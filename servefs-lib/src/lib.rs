@@ -1,7 +1,7 @@
 
 
 use std::{str::FromStr, path::{PathBuf}};
-use sqlx::{SqlitePool, sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteRow}, QueryBuilder, pool::PoolConnection, Sqlite, Row};
+use sqlx::{SqlitePool, sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteRow}, QueryBuilder, pool::PoolConnection, Sqlite, Row, ConnectOptions};
 use path_absolutize::*;
 
 pub enum FSType {
@@ -48,8 +48,8 @@ impl FromStr for FileType {
 }
 
 pub struct File {
-    name: String,
-    directory: Directory,
+    pub name: String,
+    pub directory: Directory,
 }
 
 impl File {
@@ -409,10 +409,12 @@ impl FSConnection {
     }
 
     pub async fn new(filename: &str, table_prefix: &str, create_new: bool) -> Result<FSConnection, sqlx::Error> {
-        let options = SqliteConnectOptions::from_str(filename)?
+        let mut options = SqliteConnectOptions::from_str(filename)?
             .create_if_missing(create_new)
             .foreign_keys(true)
             .journal_mode(SqliteJournalMode::Wal);
+
+        options.disable_statement_logging();
 
         let pool = SqlitePool::connect_with(options).await?;
         let (file_table, dir_table, file_type_table) = FSConnection::create_table_names(table_prefix);
