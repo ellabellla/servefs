@@ -246,6 +246,7 @@ impl Directory {
         Ok(())
     }
 
+    // Make recursion
     pub async fn del(&self, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
         let mut conn = fs_conn.pool.acquire().await?;
         QueryBuilder::new(format!(r#"
@@ -337,9 +338,9 @@ impl Directory {
 
 pub struct FSConnection {
     pool: SqlitePool,
-    file_table: String,
-    dir_table: String,
-    file_type_table: String,
+    pub file_table: String,
+    pub dir_table: String,
+    pub file_type_table: String,
 }
 
 impl FSConnection {
