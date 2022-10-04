@@ -21,6 +21,8 @@ use path_absolutize::*;
 enum FSError {
     PathIsNotAFile(String),
     PathIsNotADir(String),
+    InvalidType(String),
+    SqlX(sqlx::Error),
 }
 
 enum FileType {
@@ -39,11 +41,22 @@ impl ToString for FileType {
     }
 }
 
+impl FromStr for FileType {
+    type Err = FSError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "file" => Ok(FileType::File),
+            "text" => Ok(FileType::Text),
+            "exec" => Ok(FileType::Exec),
+            _ => Err(FSError::InvalidType(s.to_string()))
+        }
+    }
+}
+
 struct File {
     name: String,
-    ftype: FileType,
     directory: Directory,
-    data: String,
 }
 
 impl File {
@@ -54,7 +67,7 @@ impl File {
         }
     }
 
-    pub fn new(path: PathBuf, ftype: FileType, data: String) -> Result<File, FSError>{
+    pub fn new(path: PathBuf) -> Result<File, FSError>{
         let name = File::path_to_str(&path)?;
 
         let path = match path.absolutize_virtually("/") {
@@ -67,12 +80,12 @@ impl File {
             None => Directory::root(),
         };
 
-        Ok(File{name, ftype, directory, data})
+        Ok(File{name, directory})
     }
 
     pub async fn exists(&self, fs_conn: &FSConnection) -> Result<bool, sqlx::Error> {
         let mut conn = fs_conn.pool.acquire().await?;
-       Ok(QueryBuilder::new(format!(r#"
+        Ok(QueryBuilder::new(format!(r#"
                 SELECT * FROM {} WHERE directory=
             "#, fs_conn.file_table))
             .push_bind(&self.directory.path)
@@ -84,16 +97,16 @@ impl File {
             .is_some())
     }
 
-    pub async fn mk(&self, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
+    pub async fn mk(&self, data:&str, ftype: &FileType, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
         let mut conn = fs_conn.pool.acquire().await?;
         QueryBuilder::new(format!(r#"
                 INSERT INTO {}(name,type,data,directory) VALUES(
             "#, fs_conn.file_table))
             .push_bind(&self.name)
             .push(",")
-            .push_bind(&self.ftype.to_string())
+            .push_bind(&ftype.to_string())
             .push(",")
-            .push_bind(&self.data)
+            .push_bind(&data)
             .push(",")
             .push_bind(&self.directory.path)
             .push(");")
@@ -117,8 +130,8 @@ impl File {
         Ok(())
     }
 
-    pub async fn rename(&mut self, name: &File, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
-        let name = name.name.clone();
+    pub async fn rename(&mut self, name: &str, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
+        let name = name.to_string();
         let mut conn = fs_conn.pool.acquire().await?;
         QueryBuilder::new(format!(r#"
                 UPDATE {} SET name=
@@ -154,17 +167,19 @@ impl File {
         Ok(())
     }
 
-    pub async fn read(&self, fs_conn: &FSConnection) -> Result<SqliteRow, sqlx::Error> {
+    pub async fn read(&self, fs_conn: &FSConnection) -> Result<(String, String), sqlx::Error> {
         let mut conn = fs_conn.pool.acquire().await?;
-        Ok(QueryBuilder::new(format!(r#"
-                SELECT data FROM {} WHERE directory=
+        let row = QueryBuilder::new(format!(r#"
+                SELECT data,type FROM {} WHERE directory=
             "#, fs_conn.file_table))
             .push_bind(&self.directory.path)
             .push("AND name=")
             .push_bind(&self.name)
             .build()
             .fetch_one(&mut conn)
-            .await?)
+            .await?;
+
+        Ok((row.try_get("data")?, row.try_get("type")?))
     }
 
     pub async fn write(&mut self, data: &str, ftype: FileType, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
@@ -173,7 +188,7 @@ impl File {
                 UPDATE {} SET data=
             "#,fs_conn.file_table))
             .push_bind(&data)
-            .push("AND type=")
+            .push(", type=")
             .push_bind(&ftype.to_string())
             .push("WHERE directory=")
             .push_bind(&self.directory.path)
@@ -193,7 +208,14 @@ struct Directory {
 impl Directory {
     fn path_to_str(path: PathBuf) -> Result<String, FSError> {
         match path.absolutize_virtually("/") {
-            Ok(path) => Ok(format!("{}/", path.display().to_string())),
+            Ok(path) => {
+                let path = path.display().to_string();
+                if path.ends_with('/') {
+                    Ok(path)
+                } else {
+                    Ok(format!("{}/", path))
+                }
+            },
             Err(_) => Err(FSError::PathIsNotADir(path.display().to_string())),
         }        
     }
@@ -243,19 +265,34 @@ impl Directory {
         Ok(())
     }
 
-    pub async fn rename(&mut self, name: &Directory, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
-        let name = name.path.clone();
+    pub async fn mv(&mut self, path: &Directory, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
+        let path = path.path.clone();
         let mut conn = fs_conn.pool.acquire().await?;
         QueryBuilder::new(format!("UPDATE {} SET directory=(",fs_conn.dir_table))
-            .push_bind(&name)
+            .push_bind(&path)
             .push(format!(r#" || substr(directory, {})) WHERE directory LIKE "#, self.path.len()+1))
             .push_bind(format!("{}%", self.path))
             .build()
             .execute(&mut conn)
             .await?;
         
-            self.path = name;
+            self.path = path;
         Ok(())
+    }
+
+    pub fn rename(&self, name: &str) -> Result<PathBuf, FSError> {
+        let mut path = match PathBuf::from_str(&self.path) {
+            Ok(path) => path,
+            Err(_) => Err(FSError::PathIsNotADir(self.path.clone()))?,
+        };
+        let new_name = match PathBuf::from_str(&name) {
+            Ok(path) => path,
+            Err(_) => Err(FSError::PathIsNotADir(name.to_string()))?,
+        };
+        path.pop();
+        path.push(new_name);
+
+        Ok(path)
     }
 
     pub async fn files(&self, fs_conn: &FSConnection) -> Result<Vec<SqliteRow>, sqlx::Error> {
@@ -264,6 +301,17 @@ impl Directory {
                 SELECT * FROM {} WHERE directory=
             "#, fs_conn.file_table))
             .push_bind(&self.path)
+            .build()
+            .fetch_all(&mut conn)
+            .await?)
+    }
+
+    pub async fn dirs(&self, fs_conn: &FSConnection) -> Result<Vec<SqliteRow>, sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
+        Ok(QueryBuilder::new(format!(r#"
+                SELECT * FROM {} WHERE directory LIKE
+            "#, fs_conn.dir_table))
+            .push_bind(&format!("{}%/", self.path))
             .build()
             .fetch_all(&mut conn)
             .await?)
@@ -282,6 +330,8 @@ impl Directory {
                 SELECT directory FROM {} WHERE directory LIKE 
             "#, fs_conn.dir_table))
             .push_bind(format!("{}%", &self.path))
+            .push("AND directory!=")
+            .push_bind(&self.path)
             .build()
             .fetch_all(&mut conn)
             .await?,))
@@ -333,18 +383,7 @@ impl FSConnection {
         Ok(())
     }
     
-    pub async fn new(filename: &str, table_prefix: &str, create_new: bool) -> Result<FSConnection, sqlx::Error> {
-        let options = SqliteConnectOptions::from_str(filename)?
-            .create_if_missing(create_new)
-            .foreign_keys(true)
-            .journal_mode(SqliteJournalMode::Wal);
-
-        let pool = SqlitePool::connect_with(options).await?;
-        let file_table = format!("{}{}", table_prefix, "files");
-        let dir_table = format!("{}{}", table_prefix, "dirs");
-        let file_type_table = format!("{}{}", table_prefix, "file_types");
-
-        let mut conn = pool.acquire().await?;
+    async fn find_tables(conn: &mut PoolConnection<Sqlite>, dir_table: &str, file_table: &str, file_type_table: &str) -> Result<Vec<String>, sqlx::Error> {
         let found_tables: Vec<String> = QueryBuilder::new(r#"
                 SELECT name FROM sqlite_master WHERE type="table" AND (name=
             "#)
@@ -355,11 +394,33 @@ impl FSConnection {
             .push_bind(&file_type_table)
             .push(")")
             .build()
-            .fetch_all(&mut conn)
+            .fetch_all(conn)
             .await?
             .iter()
             .map(|row| {row.get(0)})
             .collect();
+        Ok(found_tables)
+    }
+
+    fn create_table_names(table_prefix: &str) -> (String, String, String) {
+        let file_table = format!("{}{}", table_prefix, "files");
+        let dir_table = format!("{}{}", table_prefix, "dirs");
+        let file_type_table = format!("{}{}", table_prefix, "file_types");
+
+        (file_table, dir_table, file_type_table)
+    }
+
+    pub async fn new(filename: &str, table_prefix: &str, create_new: bool) -> Result<FSConnection, sqlx::Error> {
+        let options = SqliteConnectOptions::from_str(filename)?
+            .create_if_missing(create_new)
+            .foreign_keys(true)
+            .journal_mode(SqliteJournalMode::Wal);
+
+        let pool = SqlitePool::connect_with(options).await?;
+        let (file_table, dir_table, file_type_table) = FSConnection::create_table_names(table_prefix);
+
+        let mut conn = pool.acquire().await?;
+        let found_tables = FSConnection::find_tables(&mut conn, &dir_table, &file_table, &file_type_table).await?;
         
         if !found_tables.contains(&file_type_table) {
             FSConnection::create_file_type_table(&mut conn, &file_type_table).await?;
@@ -378,4 +439,156 @@ impl FSConnection {
 #[tokio::main]
 async fn main() -> Result<(), sqlx::Error>{
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+
+    use std::{str::FromStr, path::PathBuf};
+
+    use sqlx::{sqlite::{SqliteConnectOptions, SqliteJournalMode}, SqlitePool, Row};
+
+    use crate::{FSConnection, File, FileType, Directory};
+
+    async fn remove_test_db() {
+        match tokio::fs::remove_file("./test.db").await {
+            Ok(_) => (),
+            Err(_) => (),
+        }
+        match tokio::fs::remove_file("./test.db-shm").await {
+            Ok(_) => (),
+            Err(_) => (),
+        }
+        match tokio::fs::remove_file("./test.db-wal").await {
+            Ok(_) => (),
+            Err(_) => (),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fs_connection() {
+        remove_test_db().await;
+
+        {
+            FSConnection::new("sqlite://test.db", "servefs_", true).await.unwrap();
+        }
+
+        let options = SqliteConnectOptions::from_str("sqlite://test.db").unwrap()
+            .foreign_keys(true)
+            .journal_mode(SqliteJournalMode::Wal);
+
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        let (file_table, dir_table, file_type_table) = FSConnection::create_table_names("servefs_");
+
+        let mut conn = pool.acquire().await.unwrap();
+        let found_tables = FSConnection::find_tables(&mut conn, &dir_table, &file_table, &file_type_table).await.unwrap();
+
+        assert!(found_tables.contains(&file_type_table));
+        assert!(found_tables.contains(&dir_table));
+        assert!(found_tables.contains(&file_table));
+
+        remove_test_db().await;
+    }
+
+    #[tokio::test]
+    async fn test_file() {
+        remove_test_db().await;
+
+        let fs_conn = FSConnection::new("sqlite://test.db", "servefs_", true).await.unwrap();
+        let mut file = File::new(PathBuf::from_str("/file").unwrap()).unwrap();
+        
+        assert!(!file.exists(&fs_conn).await.unwrap());
+        file.mk("data", &FileType::Text, &fs_conn).await.unwrap();
+        assert!(file.exists(&fs_conn).await.unwrap());
+
+        file.rename("file_2", &fs_conn).await.unwrap();
+        assert!(file.exists(&fs_conn).await.unwrap());
+        assert_eq!(file.name, "file_2");
+
+        let new_dir = Directory::new(PathBuf::from_str("/home/").unwrap()).unwrap();
+        new_dir.mk(&fs_conn).await.unwrap();
+
+
+
+        file.mv(new_dir, &fs_conn).await.unwrap();
+        assert!(file.exists(&fs_conn).await.unwrap());
+        assert_eq!(file.directory.path, "/home/");
+
+        let (data, ftype) = file.read(&fs_conn).await.unwrap();
+        assert_eq!(data, "data");
+        assert_eq!(ftype, FileType::Text.to_string());
+
+        file.write("a program", FileType::Exec, &fs_conn).await.unwrap();
+        let (data, ftype) = file.read(&fs_conn).await.unwrap();
+        assert_eq!(data, "a program");
+        assert_eq!(ftype, FileType::Exec.to_string());
+
+        file.del(&fs_conn).await.unwrap();
+        assert!(!file.exists(&fs_conn).await.unwrap());
+
+        remove_test_db().await;
+    }
+
+    #[tokio::test]
+    async fn test_directory() {
+        remove_test_db().await;
+
+        let fs_conn = FSConnection::new("sqlite://test.db", "servefs_", true).await.unwrap();
+        let mut dir = Directory::new(PathBuf::from_str("/h/").unwrap()).unwrap();
+        let sub_a = Directory::new(PathBuf::from_str("/h/a").unwrap()).unwrap();
+        let sub_b = Directory::new(PathBuf::from_str("/h/b").unwrap()).unwrap();
+        let file = File::new(PathBuf::from_str("/h/file").unwrap()).unwrap();
+
+        assert!(!dir.exists(&fs_conn).await.unwrap());
+        dir.mk(&fs_conn).await.unwrap();
+        assert!(dir.exists(&fs_conn).await.unwrap());
+        
+        sub_a.mk(&fs_conn).await.unwrap();
+        assert!(sub_a.exists(&fs_conn).await.unwrap());
+        sub_b.mk(&fs_conn).await.unwrap();
+        assert!(sub_b.exists(&fs_conn).await.unwrap());
+        file.mk("data", &FileType::Text, &fs_conn).await.unwrap();
+        assert!(file.exists(&fs_conn).await.unwrap());
+
+        dir.mv(&Directory::new(dir.rename("home").unwrap()).unwrap(), &fs_conn).await.unwrap();
+        
+        assert!(dir.exists(&fs_conn).await.unwrap());
+        assert_eq!(dir.path, "/home/");
+        assert!(!sub_a.exists(&fs_conn).await.unwrap());
+        assert!(!sub_b.exists(&fs_conn).await.unwrap());
+        assert!(!file.exists(&fs_conn).await.unwrap());
+        let sub_a = Directory::new(PathBuf::from_str("/home/a").unwrap()).unwrap();
+        let sub_b = Directory::new(PathBuf::from_str("/home/b").unwrap()).unwrap();
+        let file = File::new(PathBuf::from_str("/home/file").unwrap()).unwrap();
+        assert!(sub_a.exists(&fs_conn).await.unwrap());
+        assert!(sub_b.exists(&fs_conn).await.unwrap());
+        assert!(file.exists(&fs_conn).await.unwrap());
+
+        let file_a = File::new(PathBuf::from_str("/home/a/file_a").unwrap()).unwrap();
+        file_a.mk("data", &FileType::Text, &fs_conn).await.unwrap();
+        assert!(file_a.exists(&fs_conn).await.unwrap());
+
+        let files = dir.files(&fs_conn).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].get::<String, &str>("name"), "file");
+
+        let dirs: Vec<String>= dir.dirs(&fs_conn).await.unwrap().iter().map(|r| r.get("directory")).collect();
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs.contains(&"/home/a/".to_string()));
+        assert!(dirs.contains(&"/home/b/".to_string()));
+
+        let all = dir.recurse(&fs_conn).await.unwrap();
+        assert_eq!(all.0.len(), 2);
+        assert_eq!(all.1.len(), 2);
+
+        let files: Vec<String>= all.0.iter().map(|r| r.get("name")).collect();
+        assert!(files.contains(&"file".to_string()));
+        assert!(files.contains(&"file_a".to_string()));
+
+        let dirs: Vec<String>= all.1.iter().map(|r| r.get("directory")).collect();
+        assert!(dirs.contains(&"/home/a/".to_string()));
+        assert!(dirs.contains(&"/home/b/".to_string()));
+
+        remove_test_db().await;
+    }
 }
