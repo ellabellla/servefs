@@ -1,7 +1,129 @@
-use std::str::FromStr;
+/*#[macro_use] extern crate rocket;
+use std::path::PathBuf;
 
-use sqlx::{SqlitePool, pool::PoolConnection, QueryBuilder, Sqlite, sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteRow}, Row};
+#[get("/files/<a>")]
+fn get_file(a: String) -> String {
+    path.last().unwrap().to_string()
+}
 
+
+#[launch]
+fn servefs() -> _ {
+    rocket::build()
+        .mount("/", routes![get_file])
+}*/
+
+use std::{str::FromStr, path::{PathBuf, self}};
+use sqlx::{SqlitePool, sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteRow}, QueryBuilder, pool::PoolConnection, Sqlite, Row};
+use path_absolutize::*;
+
+#[derive(Debug)]
+enum FSError {
+    PathIsNotAFile(String),
+    PathIsNotADir(String),
+}
+
+struct Directory {
+    path: String,
+}
+
+impl Directory {
+    fn path_to_str(path: PathBuf) -> Result<String, FSError> {
+        match path.absolutize_virtually("/") {
+            Ok(path) => Ok(format!("{}/", path.display().to_string())),
+            Err(_) => Err(FSError::PathIsNotADir(path.display().to_string())),
+        }        
+    }
+
+    pub fn new(path: PathBuf) -> Result<Directory, FSError>{
+        Ok(Directory{path: Directory::path_to_str(path)?})
+    }
+
+    pub fn root() -> Directory {
+        Directory { path: "/".to_string() }
+    }
+
+    pub async fn exists(&self, fs_sql: &FSSQL) -> Result<bool, sqlx::Error> {
+        let mut conn = fs_sql.pool.acquire().await?;
+       Ok(QueryBuilder::new(format!(r#"
+                SELECT * FROM {} WHERE directory=
+            "#, fs_sql.dir_table))
+            .push_bind(&self.path)
+            .build()
+            .fetch_optional(&mut conn)
+            .await?
+            .is_some())
+    }
+
+    pub async fn mk(&self, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
+        let mut conn = fs_sql.pool.acquire().await?;
+        QueryBuilder::new(format!(r#"
+                INSERT INTO {}(directory) VALUES(
+            "#, fs_sql.dir_table))
+            .push_bind(&self.path)
+            .push(");")
+            .build()
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn del(&self, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
+        let mut conn = fs_sql.pool.acquire().await?;
+        QueryBuilder::new(format!(r#"
+                DELETE FROM {} where directory=
+            "#, fs_sql.dir_table))
+            .push_bind(&self.path)
+            .build()
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn rename(&mut self, name: &Directory, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
+        let name = name.path.clone();
+        let mut conn = fs_sql.pool.acquire().await?;
+        QueryBuilder::new(format!("UPDATE {} SET directory=(",fs_sql.dir_table))
+            .push_bind(&name)
+            .push(format!(r#" || substr(directory, {})) WHERE directory LIKE "#, self.path.len()+1))
+            .push_bind(format!("{}%", self.path))
+            .build()
+            .execute(&mut conn)
+            .await?;
+        
+            self.path = name;
+        Ok(())
+    }
+
+    pub async fn files(&self, fs_sql: &FSSQL) -> Result<Vec<SqliteRow>, sqlx::Error> {
+        let mut conn = fs_sql.pool.acquire().await?;
+        Ok(QueryBuilder::new(format!(r#"
+                SELECT * FROM {} WHERE directory=
+            "#, fs_sql.file_table))
+            .push_bind(&self.path)
+            .build()
+            .fetch_all(&mut conn)
+            .await?)
+    }
+
+    pub async fn recurse(&self, fs_sql: &FSSQL) -> Result<(Vec<SqliteRow>, Vec<SqliteRow>), sqlx::Error> {
+        let mut conn = fs_sql.pool.acquire().await?;
+        Ok((QueryBuilder::new(format!(r#"
+                SELECT name,type,directory FROM {} WHERE directory LIKE 
+            "#, fs_sql.file_table))
+            .push_bind(format!("{}%", &self.path))
+            .build()
+            .fetch_all(&mut conn)
+            .await?,
+            QueryBuilder::new(format!(r#"
+                SELECT directory FROM {} WHERE directory LIKE 
+            "#, fs_sql.dir_table))
+            .push_bind(format!("{}%", &self.path))
+            .build()
+            .fetch_all(&mut conn)
+            .await?,))
+    }
+}
 
 struct FSSQL {
     pool: SqlitePool,
