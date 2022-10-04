@@ -1,31 +1,18 @@
-/*#[macro_use] extern crate rocket;
-use std::path::PathBuf;
 
-#[get("/files/<a>")]
-fn get_file(a: String) -> String {
-    path.last().unwrap().to_string()
-}
-
-
-#[launch]
-fn servefs() -> _ {
-    rocket::build()
-        .mount("/", routes![get_file])
-}*/
 
 use std::{str::FromStr, path::{PathBuf}};
 use sqlx::{SqlitePool, sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteRow}, QueryBuilder, pool::PoolConnection, Sqlite, Row};
 use path_absolutize::*;
 
 #[derive(Debug)]
-enum FSError {
+pub enum FSError {
     PathIsNotAFile(String),
     PathIsNotADir(String),
     InvalidType(String),
     SqlX(sqlx::Error),
 }
 
-enum FileType {
+pub enum FileType {
     File,
     Text,
     Exec
@@ -54,7 +41,7 @@ impl FromStr for FileType {
     }
 }
 
-struct File {
+pub struct File {
     name: String,
     directory: Directory,
 }
@@ -201,7 +188,7 @@ impl File {
     }
 }
 
-struct Directory {
+pub struct Directory {
     path: String,
 }
 
@@ -338,7 +325,7 @@ impl Directory {
     }
 }
 
-struct FSConnection {
+pub struct FSConnection {
     pool: SqlitePool,
     file_table: String,
     dir_table: String,
@@ -436,10 +423,6 @@ impl FSConnection {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), sqlx::Error>{
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
