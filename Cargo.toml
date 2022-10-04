@@ -1,6 +1,6 @@
 [workspace]
 
 members = [
-    "servefs-bin",
+    "servefs-server",
     "servefs-lib",
 ]

@@ -1465,21 +1465,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "servefs"
+name = "servefs-lib"
 version = "0.1.0"
 dependencies = [
  "path-absolutize",
- "rocket",
- "servefs-lib",
  "sqlx",
  "tokio",
 ]
 
 [[package]]
-name = "servefs-lib"
+name = "servefs-server"
 version = "0.1.0"
 dependencies = [
  "path-absolutize",
+ "rocket",
+ "servefs-lib",
  "sqlx",
  "tokio",
 ]
