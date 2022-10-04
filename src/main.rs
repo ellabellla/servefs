@@ -13,7 +13,7 @@ fn servefs() -> _ {
         .mount("/", routes![get_file])
 }*/
 
-use std::{str::FromStr, path::{PathBuf, self}};
+use std::{str::FromStr, path::{PathBuf}};
 use sqlx::{SqlitePool, sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteRow}, QueryBuilder, pool::PoolConnection, Sqlite, Row};
 use path_absolutize::*;
 
@@ -21,6 +21,169 @@ use path_absolutize::*;
 enum FSError {
     PathIsNotAFile(String),
     PathIsNotADir(String),
+}
+
+enum FileType {
+    File,
+    Text,
+    Exec
+}
+
+impl ToString for FileType {
+    fn to_string(&self) -> String {
+        match self {
+            FileType::File => String::from("file"),
+            FileType::Text => String::from("text"),
+            FileType::Exec => String::from("exec"),
+        }
+    }
+}
+
+struct File {
+    name: String,
+    ftype: FileType,
+    directory: Directory,
+    data: String,
+}
+
+impl File {
+    fn path_to_str(path: &PathBuf) ->  Result<String, FSError> {
+        match path.file_name() {
+            Some(name) => Ok(name.to_string_lossy().to_string()),
+            None => return Err(FSError::PathIsNotAFile(path.display().to_string())),
+        }
+    }
+
+    pub fn new(path: PathBuf, ftype: FileType, data: String) -> Result<File, FSError>{
+        let name = File::path_to_str(&path)?;
+
+        let path = match path.absolutize_virtually("/") {
+            Ok(path) => path,
+            Err(_) => Err(FSError::PathIsNotAFile(path.display().to_string()))?,
+        };
+
+        let directory = match path.parent() {
+            Some(directory) => Directory::new(directory.to_path_buf())?,
+            None => Directory::root(),
+        };
+
+        Ok(File{name, ftype, directory, data})
+    }
+
+    pub async fn exists(&self, fs_sql: &FSSQL) -> Result<bool, sqlx::Error> {
+        let mut conn = fs_sql.pool.acquire().await?;
+       Ok(QueryBuilder::new(format!(r#"
+                SELECT * FROM {} WHERE directory=
+            "#, fs_sql.file_table))
+            .push_bind(&self.directory.path)
+            .push("AND name=")
+            .push_bind(&self.name)
+            .build()
+            .fetch_optional(&mut conn)
+            .await?
+            .is_some())
+    }
+
+    pub async fn mk(&self, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
+        let mut conn = fs_sql.pool.acquire().await?;
+        QueryBuilder::new(format!(r#"
+                INSERT INTO {}(name,type,data,directory) VALUES(
+            "#, fs_sql.file_table))
+            .push_bind(&self.name)
+            .push(",")
+            .push_bind(&self.ftype.to_string())
+            .push(",")
+            .push_bind(&self.data)
+            .push(",")
+            .push_bind(&self.directory.path)
+            .push(");")
+            .build()
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn del(&self, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
+        let mut conn = fs_sql.pool.acquire().await?;
+        QueryBuilder::new(format!(r#"
+                DELETE FROM {} where directory=
+            "#, fs_sql.file_table))
+            .push_bind(&self.directory.path)
+            .push("AND name=")
+            .push_bind(&self.name)
+            .build()
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn rename(&mut self, name: &File, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
+        let name = name.name.clone();
+        let mut conn = fs_sql.pool.acquire().await?;
+        QueryBuilder::new(format!(r#"
+                UPDATE {} SET name=
+            "#,fs_sql.file_table))
+            .push_bind(&name)
+            .push("WHERE directory=")
+            .push_bind(&self.directory.path)
+            .push("AND name=")
+            .push_bind(&self.name)
+            .build()
+            .execute(&mut conn)
+            .await?;
+        
+            self.name = name;
+        Ok(())
+    }
+
+    pub async fn mv(&mut self, directory: Directory, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
+        let mut conn = fs_sql.pool.acquire().await?;
+        QueryBuilder::new(format!(r#"
+                UPDATE {} SET directory=
+            "#,fs_sql.file_table))
+            .push_bind(&directory.path)
+            .push("WHERE directory=")
+            .push_bind(&self.directory.path)
+            .push("AND name=")
+            .push_bind(&self.name)
+            .build()
+            .execute(&mut conn)
+            .await?;
+        
+            self.directory = directory;
+        Ok(())
+    }
+
+    pub async fn read(&self, fs_sql: &FSSQL) -> Result<SqliteRow, sqlx::Error> {
+        let mut conn = fs_sql.pool.acquire().await?;
+        Ok(QueryBuilder::new(format!(r#"
+                SELECT data FROM {} WHERE directory=
+            "#, fs_sql.file_table))
+            .push_bind(&self.directory.path)
+            .push("AND name=")
+            .push_bind(&self.name)
+            .build()
+            .fetch_one(&mut conn)
+            .await?)
+    }
+
+    pub async fn write(&mut self, data: &str, ftype: FileType, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
+        let mut conn = fs_sql.pool.acquire().await?;
+        QueryBuilder::new(format!(r#"
+                UPDATE {} SET data=
+            "#,fs_sql.file_table))
+            .push_bind(&data)
+            .push("AND type=")
+            .push_bind(&ftype.to_string())
+            .push("WHERE directory=")
+            .push_bind(&self.directory.path)
+            .push("AND name=")
+            .push_bind(&self.name)
+            .build()
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
 }
 
 struct Directory {
