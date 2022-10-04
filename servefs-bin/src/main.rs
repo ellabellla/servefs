@@ -1,5 +1,5 @@
 #[macro_use] extern crate rocket;
-use std::{path::{PathBuf, Path}, str::FromStr};
+use std::{path::{PathBuf}, str::FromStr};
 use rocket::{State, http::{ContentType}};
 use servefs_lib::*;
 use sqlx::{Row, sqlite::SqliteRow};
@@ -41,18 +41,23 @@ async fn render_file(data: String, ftype: String) -> Option<(ContentType, String
 }
 
 async fn render_dir(parent: &Directory, files: Vec<SqliteRow>, dirs: Vec<SqliteRow>) -> Option<(ContentType, String)> {
-    let dirs = dirs
+    let mut contents = dirs
         .iter()
         .map(|row| row.get::<String, &str>("directory"))
-        .map(|name| format!("<a href=\"/files{}\">{}</a>", name, name));
-    let files = files
+        .map(|name| format!("<a href=\"/files{}\">{}</a>", name, name))
+        .collect::<Vec<String>>();
+    let mut files = files
         .iter()
         .map(|row| row.get::<String, &str>("name"))
-        .map(|name| format!("<a href=\"/files{}{}\">{}</a>", parent.path, name, name));
+        .map(|name| format!("<a href=\"/files{}{}\">{}</a>", parent.path, name, name))
+        .collect::<Vec<String>>();
 
-    let contents = dirs.chain(files);
+    contents.sort();
+    files.sort();
 
-    let output = format!("<doctype html><html><body>{}</body></html>", contents.collect::<Vec<String>>().join("</br>"));
+    contents.extend(files);
+
+    let output = format!("<doctype html><html><body style=\"background-color:black;color:white;\">{}</body></html>", contents.join("</br>"));
 
     Some((ContentType::HTML, output))
 }
@@ -63,7 +68,7 @@ async fn get_fs(path: PathBuf, fs_conn: &State<FSConnection>) -> Option<(Content
         Ok(fs_type) => match fs_type {
             FSType::File(file) => match file.read(&fs_conn).await {
                 Ok((data, ftype)) => render_file(data, ftype).await,
-                Err(e) => None,
+                Err(_) => None,
             },
             FSType::Directory(dir) => match dir.contents(fs_conn).await {
                 Ok((files, dirs)) => render_dir(&dir, files, dirs).await,
