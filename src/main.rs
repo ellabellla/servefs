@@ -70,11 +70,11 @@ impl File {
         Ok(File{name, ftype, directory, data})
     }
 
-    pub async fn exists(&self, fs_sql: &FSSQL) -> Result<bool, sqlx::Error> {
-        let mut conn = fs_sql.pool.acquire().await?;
+    pub async fn exists(&self, fs_conn: &FSConnection) -> Result<bool, sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
        Ok(QueryBuilder::new(format!(r#"
                 SELECT * FROM {} WHERE directory=
-            "#, fs_sql.file_table))
+            "#, fs_conn.file_table))
             .push_bind(&self.directory.path)
             .push("AND name=")
             .push_bind(&self.name)
@@ -84,11 +84,11 @@ impl File {
             .is_some())
     }
 
-    pub async fn mk(&self, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
-        let mut conn = fs_sql.pool.acquire().await?;
+    pub async fn mk(&self, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
         QueryBuilder::new(format!(r#"
                 INSERT INTO {}(name,type,data,directory) VALUES(
-            "#, fs_sql.file_table))
+            "#, fs_conn.file_table))
             .push_bind(&self.name)
             .push(",")
             .push_bind(&self.ftype.to_string())
@@ -103,11 +103,11 @@ impl File {
         Ok(())
     }
 
-    pub async fn del(&self, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
-        let mut conn = fs_sql.pool.acquire().await?;
+    pub async fn del(&self, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
         QueryBuilder::new(format!(r#"
                 DELETE FROM {} where directory=
-            "#, fs_sql.file_table))
+            "#, fs_conn.file_table))
             .push_bind(&self.directory.path)
             .push("AND name=")
             .push_bind(&self.name)
@@ -117,12 +117,12 @@ impl File {
         Ok(())
     }
 
-    pub async fn rename(&mut self, name: &File, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
+    pub async fn rename(&mut self, name: &File, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
         let name = name.name.clone();
-        let mut conn = fs_sql.pool.acquire().await?;
+        let mut conn = fs_conn.pool.acquire().await?;
         QueryBuilder::new(format!(r#"
                 UPDATE {} SET name=
-            "#,fs_sql.file_table))
+            "#,fs_conn.file_table))
             .push_bind(&name)
             .push("WHERE directory=")
             .push_bind(&self.directory.path)
@@ -136,11 +136,11 @@ impl File {
         Ok(())
     }
 
-    pub async fn mv(&mut self, directory: Directory, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
-        let mut conn = fs_sql.pool.acquire().await?;
+    pub async fn mv(&mut self, directory: Directory, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
         QueryBuilder::new(format!(r#"
                 UPDATE {} SET directory=
-            "#,fs_sql.file_table))
+            "#,fs_conn.file_table))
             .push_bind(&directory.path)
             .push("WHERE directory=")
             .push_bind(&self.directory.path)
@@ -154,11 +154,11 @@ impl File {
         Ok(())
     }
 
-    pub async fn read(&self, fs_sql: &FSSQL) -> Result<SqliteRow, sqlx::Error> {
-        let mut conn = fs_sql.pool.acquire().await?;
+    pub async fn read(&self, fs_conn: &FSConnection) -> Result<SqliteRow, sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
         Ok(QueryBuilder::new(format!(r#"
                 SELECT data FROM {} WHERE directory=
-            "#, fs_sql.file_table))
+            "#, fs_conn.file_table))
             .push_bind(&self.directory.path)
             .push("AND name=")
             .push_bind(&self.name)
@@ -167,11 +167,11 @@ impl File {
             .await?)
     }
 
-    pub async fn write(&mut self, data: &str, ftype: FileType, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
-        let mut conn = fs_sql.pool.acquire().await?;
+    pub async fn write(&mut self, data: &str, ftype: FileType, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
         QueryBuilder::new(format!(r#"
                 UPDATE {} SET data=
-            "#,fs_sql.file_table))
+            "#,fs_conn.file_table))
             .push_bind(&data)
             .push("AND type=")
             .push_bind(&ftype.to_string())
@@ -206,11 +206,11 @@ impl Directory {
         Directory { path: "/".to_string() }
     }
 
-    pub async fn exists(&self, fs_sql: &FSSQL) -> Result<bool, sqlx::Error> {
-        let mut conn = fs_sql.pool.acquire().await?;
+    pub async fn exists(&self, fs_conn: &FSConnection) -> Result<bool, sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
        Ok(QueryBuilder::new(format!(r#"
                 SELECT * FROM {} WHERE directory=
-            "#, fs_sql.dir_table))
+            "#, fs_conn.dir_table))
             .push_bind(&self.path)
             .build()
             .fetch_optional(&mut conn)
@@ -218,11 +218,11 @@ impl Directory {
             .is_some())
     }
 
-    pub async fn mk(&self, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
-        let mut conn = fs_sql.pool.acquire().await?;
+    pub async fn mk(&self, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
         QueryBuilder::new(format!(r#"
                 INSERT INTO {}(directory) VALUES(
-            "#, fs_sql.dir_table))
+            "#, fs_conn.dir_table))
             .push_bind(&self.path)
             .push(");")
             .build()
@@ -231,11 +231,11 @@ impl Directory {
         Ok(())
     }
 
-    pub async fn del(&self, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
-        let mut conn = fs_sql.pool.acquire().await?;
+    pub async fn del(&self, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
         QueryBuilder::new(format!(r#"
                 DELETE FROM {} where directory=
-            "#, fs_sql.dir_table))
+            "#, fs_conn.dir_table))
             .push_bind(&self.path)
             .build()
             .execute(&mut conn)
@@ -243,10 +243,10 @@ impl Directory {
         Ok(())
     }
 
-    pub async fn rename(&mut self, name: &Directory, fs_sql: &FSSQL) -> Result<(), sqlx::Error> {
+    pub async fn rename(&mut self, name: &Directory, fs_conn: &FSConnection) -> Result<(), sqlx::Error> {
         let name = name.path.clone();
-        let mut conn = fs_sql.pool.acquire().await?;
-        QueryBuilder::new(format!("UPDATE {} SET directory=(",fs_sql.dir_table))
+        let mut conn = fs_conn.pool.acquire().await?;
+        QueryBuilder::new(format!("UPDATE {} SET directory=(",fs_conn.dir_table))
             .push_bind(&name)
             .push(format!(r#" || substr(directory, {})) WHERE directory LIKE "#, self.path.len()+1))
             .push_bind(format!("{}%", self.path))
@@ -258,29 +258,29 @@ impl Directory {
         Ok(())
     }
 
-    pub async fn files(&self, fs_sql: &FSSQL) -> Result<Vec<SqliteRow>, sqlx::Error> {
-        let mut conn = fs_sql.pool.acquire().await?;
+    pub async fn files(&self, fs_conn: &FSConnection) -> Result<Vec<SqliteRow>, sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
         Ok(QueryBuilder::new(format!(r#"
                 SELECT * FROM {} WHERE directory=
-            "#, fs_sql.file_table))
+            "#, fs_conn.file_table))
             .push_bind(&self.path)
             .build()
             .fetch_all(&mut conn)
             .await?)
     }
 
-    pub async fn recurse(&self, fs_sql: &FSSQL) -> Result<(Vec<SqliteRow>, Vec<SqliteRow>), sqlx::Error> {
-        let mut conn = fs_sql.pool.acquire().await?;
+    pub async fn recurse(&self, fs_conn: &FSConnection) -> Result<(Vec<SqliteRow>, Vec<SqliteRow>), sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
         Ok((QueryBuilder::new(format!(r#"
                 SELECT name,type,directory FROM {} WHERE directory LIKE 
-            "#, fs_sql.file_table))
+            "#, fs_conn.file_table))
             .push_bind(format!("{}%", &self.path))
             .build()
             .fetch_all(&mut conn)
             .await?,
             QueryBuilder::new(format!(r#"
                 SELECT directory FROM {} WHERE directory LIKE 
-            "#, fs_sql.dir_table))
+            "#, fs_conn.dir_table))
             .push_bind(format!("{}%", &self.path))
             .build()
             .fetch_all(&mut conn)
@@ -288,14 +288,14 @@ impl Directory {
     }
 }
 
-struct FSSQL {
+struct FSConnection {
     pool: SqlitePool,
     file_table: String,
     dir_table: String,
     file_type_table: String,
 }
 
-impl FSSQL {
+impl FSConnection {
     async fn create_file_type_table(conn: &mut PoolConnection<Sqlite>, file_type_table: &str) -> Result<(), sqlx::Error>{
         QueryBuilder::new(format!(r#"
                 CREATE TABLE {} (type TEXT PRIMARY KEY NOT NULL);
@@ -333,7 +333,7 @@ impl FSSQL {
         Ok(())
     }
     
-    pub async fn new(filename: &str, table_prefix: &str, create_new: bool) -> Result<FSSQL, sqlx::Error> {
+    pub async fn new(filename: &str, table_prefix: &str, create_new: bool) -> Result<FSConnection, sqlx::Error> {
         let options = SqliteConnectOptions::from_str(filename)?
             .create_if_missing(create_new)
             .foreign_keys(true)
@@ -362,21 +362,20 @@ impl FSSQL {
             .collect();
         
         if !found_tables.contains(&file_type_table) {
-            FSSQL::create_file_type_table(&mut conn, &file_type_table).await?;
+            FSConnection::create_file_type_table(&mut conn, &file_type_table).await?;
         }
         if !found_tables.contains(&dir_table) {
-            FSSQL::create_dir_table(&mut conn, &dir_table).await?;
+            FSConnection::create_dir_table(&mut conn, &dir_table).await?;
         }
         if !found_tables.contains(&file_table) {
-            FSSQL::create_file_table(&mut conn, &dir_table, &file_table, &file_type_table).await?;
+            FSConnection::create_file_table(&mut conn, &dir_table, &file_table, &file_type_table).await?;
         }
 
-        Ok(FSSQL { pool, file_table, dir_table, file_type_table })
+        Ok(FSConnection { pool, file_table, dir_table, file_type_table })
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), sqlx::Error>{
-    let fsSQL = FSSQL::new("sqlite://fs.db", "servefs_", true).await?;
     Ok(())
 }
