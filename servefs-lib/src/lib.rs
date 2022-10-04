@@ -4,10 +4,16 @@ use std::{str::FromStr, path::{PathBuf}};
 use sqlx::{SqlitePool, sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteRow}, QueryBuilder, pool::PoolConnection, Sqlite, Row};
 use path_absolutize::*;
 
+pub enum FSType {
+    File(File),
+    Directory(Directory),
+}
+
 #[derive(Debug)]
 pub enum FSError {
     PathIsNotAFile(String),
     PathIsNotADir(String),
+    DoesNotExist(String),
     InvalidType(String),
     SqlX(sqlx::Error),
 }
@@ -189,7 +195,7 @@ impl File {
 }
 
 pub struct Directory {
-    path: String,
+    pub path: String,
 }
 
 impl Directory {
@@ -302,6 +308,10 @@ impl Directory {
             .build()
             .fetch_all(&mut conn)
             .await?)
+    }
+
+    pub async fn contents(&self, fs_conn: &FSConnection) -> Result<(Vec<SqliteRow>, Vec<SqliteRow>), sqlx::Error>  {
+        Ok((self.files(fs_conn).await?, self.dirs(fs_conn).await?))
     }
 
     pub async fn recurse(&self, fs_conn: &FSConnection) -> Result<(Vec<SqliteRow>, Vec<SqliteRow>), sqlx::Error> {
@@ -421,6 +431,33 @@ impl FSConnection {
 
         Ok(FSConnection { pool, file_table, dir_table, file_type_table })
     }
+
+    pub async fn resolve_path(&self, path: PathBuf) -> Result<FSType, FSError> {
+        match Directory::new(path.clone()) {
+            Ok(dir) => {
+                if match dir.exists(&self).await {
+                    Ok(found) => found,
+                    Err(e) => Err(FSError::SqlX(e))?,
+                } {
+                    return Ok(FSType::Directory(dir))
+                }        
+            },
+            _ => (),
+        }
+        match File::new(path.clone()) {
+            Ok(file) => {
+                if match file.exists(&self).await {
+                    Ok(found) => found,
+                    Err(e) => Err(FSError::SqlX(e))?,
+                } {
+                    return Ok(FSType::File(file))
+                }
+            },
+            _ => (),
+        }
+
+        Err(FSError::DoesNotExist(path.display().to_string()))
+    }
 }
 
 
@@ -431,7 +468,7 @@ mod tests {
 
     use sqlx::{sqlite::{SqliteConnectOptions, SqliteJournalMode}, SqlitePool, Row};
 
-    use crate::{FSConnection, File, FileType, Directory};
+    use crate::{FSConnection, File, FileType, Directory, FSType};
 
     async fn remove_test_db() {
         match tokio::fs::remove_file("./test.db").await {
@@ -453,7 +490,18 @@ mod tests {
         remove_test_db().await;
 
         {
-            FSConnection::new("sqlite://test.db", "servefs_", true).await.unwrap();
+            let fs_conn = FSConnection::new("sqlite://test.db", "servefs_", true).await.unwrap();
+
+            let file = File::new(PathBuf::from_str("/file").unwrap()).unwrap();
+            file.mk("data", &FileType::Text, &fs_conn).await.unwrap();
+            assert!(file.exists(&fs_conn).await.unwrap());
+
+            let dir = Directory::new(PathBuf::from_str("/h/").unwrap()).unwrap();
+            dir.mk(&fs_conn).await.unwrap();
+            assert!(dir.exists(&fs_conn).await.unwrap());
+
+            assert!(matches!(fs_conn.resolve_path(PathBuf::from_str("/file").unwrap()).await.unwrap(), FSType::File(_)));
+            assert!(matches!(fs_conn.resolve_path(PathBuf::from_str("/h").unwrap()).await.unwrap(), FSType::Directory(_)));
         }
 
         let options = SqliteConnectOptions::from_str("sqlite://test.db").unwrap()
@@ -469,6 +517,7 @@ mod tests {
         assert!(found_tables.contains(&file_type_table));
         assert!(found_tables.contains(&dir_table));
         assert!(found_tables.contains(&file_table));
+
 
         remove_test_db().await;
     }
