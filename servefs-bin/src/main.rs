@@ -5,7 +5,7 @@ use servefs_lib::*;
 use sqlx::{Row, sqlite::SqliteRow};
 use std::str;
 
-async fn exec(command: &str) -> Option<(ContentType, String)>{
+async fn exec(ext: &str, command: &str) -> Option<(ContentType, Vec<u8>)>{
     tokio::process::Command::new("bash")
         .arg("-c")
         .arg(&command)
@@ -17,10 +17,10 @@ async fn exec(command: &str) -> Option<(ContentType, String)>{
             .ok()
             .map(|out| out.to_string())
         )
-        .map(|str| (ContentType::Text, str))
+        .map(|str| (ContentType::from_extension(ext).unwrap_or(ContentType::Text), str.as_bytes().to_vec()))
 }
 
-async fn render_file(data: String, ftype: String) -> Option<(ContentType, String)> {
+async fn render_file(ext: &str, data: String, ftype: String) -> Option<(ContentType, Vec<u8>)> {
     let ftype = match FileType::from_str(&ftype) {
         Ok(ftype) => ftype,
         Err(_) => return None,
@@ -29,18 +29,18 @@ async fn render_file(data: String, ftype: String) -> Option<(ContentType, String
     match ftype {
         FileType::File => {
             let path = PathBuf::from_str(&data).ok()?;
-            tokio::fs::read_to_string(path).await.ok()
-                .map(|str| (ContentType::Text, str))
+            tokio::fs::read(path).await.ok()
+                .map(|str| (ContentType::from_extension(ext).unwrap_or(ContentType::Text), str))
         },
-        FileType::Text => Some((ContentType::Text, data)),
+        FileType::Text => Some((ContentType::from_extension(ext).unwrap_or(ContentType::Text), data.as_bytes().to_vec())),
         FileType::Exec => tokio::time::timeout(
             tokio::time::Duration::from_secs(1), 
-            exec(&data)
+            exec(ext, &data)
         ).await.ok().and_then(|o|o),
     }
 }
 
-async fn render_dir(parent: &Directory, files: Vec<SqliteRow>, dirs: Vec<SqliteRow>) -> Option<(ContentType, String)> {
+async fn render_dir(parent: &Directory, files: Vec<SqliteRow>, dirs: Vec<SqliteRow>) -> Option<(ContentType, Vec<u8>)> {
     let mut contents = dirs
         .iter()
         .map(|row| row.get::<String, &str>("directory"))
@@ -59,15 +59,25 @@ async fn render_dir(parent: &Directory, files: Vec<SqliteRow>, dirs: Vec<SqliteR
 
     let output = format!("<doctype html><html><body style=\"background-color:black;color:white;\">{}</body></html>", contents.join("</br>"));
 
-    Some((ContentType::HTML, output))
+    Some((ContentType::HTML, output.as_bytes().to_vec()))
+}
+
+fn get_ext(name: &str) -> String {
+    let path = match PathBuf::from_str(name){
+        Ok(path) => path,
+        Err(_) => return "".to_string(),
+    };
+    path.extension().map(|ostr| 
+        ostr.to_str().map(|str| str.to_string()).unwrap_or("".to_string())
+    ).unwrap_or("".to_string())
 }
 
 #[get("/files/<path..>")]
-async fn get_fs(path: PathBuf, fs_conn: &State<FSConnection>) -> Option<(ContentType, String)> {
+async fn get_fs(path: PathBuf, fs_conn: &State<FSConnection>) -> Option<(ContentType, Vec<u8>)> {
     match fs_conn.resolve_path(path).await {
         Ok(fs_type) => match fs_type {
             FSType::File(file) => match file.read(&fs_conn).await {
-                Ok((data, ftype)) => render_file(data, ftype).await,
+                Ok((data, ftype)) => render_file(&get_ext(&file.name), data, ftype).await,
                 Err(_) => None,
             },
             FSType::Directory(dir) => match dir.contents(fs_conn).await {
