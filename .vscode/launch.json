@@ -7,6 +7,62 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "Debug executable 'servefs-server'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=servefs-server",
+                    "--package=servefs-server"
+                ],
+                "filter": {
+                    "name": "servefs-server",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'servefs-server'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=servefs-server",
+                    "--package=servefs-server"
+                ],
+                "filter": {
+                    "name": "servefs-server",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'servefs-lib'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=servefs-lib"
+                ],
+                "filter": {
+                    "name": "servefs-lib",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug executable 'servefs'",
             "cargo": {
                 "args": [
@@ -36,25 +92,6 @@
                 "filter": {
                     "name": "servefs",
                     "kind": "bin"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in library 'servefs-lib'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--lib",
-                    "--package=servefs-lib"
-                ],
-                "filter": {
-                    "name": "servefs-lib",
-                    "kind": "lib"
                 }
             },
             "args": [],
