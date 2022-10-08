@@ -1,7 +1,11 @@
 [package]
 name = "servefs-server"
+authors = ["Ella Pash"]
 version = "0.1.0"
 edition = "2021"
+description = "Serves a sqlite based filesystem to the web"
+license = "../MIT"
+readme = "../README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
