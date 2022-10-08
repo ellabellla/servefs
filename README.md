@@ -48,5 +48,19 @@ Options:
   -V, --version          Print version information
 ```
 
+## Install
+```bash
+git clone https://github.com/ellabellla/servefs.git
+cd servefs
+cargo install --path ./servefs-server
+cargo install --path ./servefs-cli
+```
+
+## Uninstall
+```bash
+cargo uninstall servefs-server
+cargo uninstall servefs
+```
+
 ## License
 This software is provided under the MIT license. Click [here](LICENSE) to view.
