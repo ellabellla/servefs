@@ -3,6 +3,7 @@ use std::{path::{PathBuf}, str::FromStr};
 use rocket::{State, http::{ContentType}};
 use servefs_lib::*;
 use sqlx::{Row, sqlite::SqliteRow};
+use tera::{Tera, Context};
 use std::str;
 
 async fn exec(ext: &str, command: &str) -> Option<(ContentType, Vec<u8>)>{
@@ -40,26 +41,28 @@ async fn render_file(ext: &str, data: String, ftype: String) -> Option<(ContentT
     }
 }
 
-async fn render_dir(parent: &Directory, files: Vec<SqliteRow>, dirs: Vec<SqliteRow>) -> Option<(ContentType, Vec<u8>)> {
-    let mut contents = dirs
+async fn render_dir(parent: &Directory, files: Vec<SqliteRow>, dirs: Vec<SqliteRow>, tera: &State<Tera>) -> Option<(ContentType, Vec<u8>)> {
+    let mut dirs = dirs
         .iter()
         .map(|row| row.get::<String, &str>("directory"))
-        .map(|name| format!("<a href=\"/files{}\">{}</a>", name, name))
+        .map(|name| name)
         .collect::<Vec<String>>();
     let mut files = files
         .iter()
         .map(|row| row.get::<String, &str>("name"))
-        .map(|name| format!("<a href=\"/files{}{}\">{}</a>", parent.path, name, name))
+        .map(|name| name)
         .collect::<Vec<String>>();
 
-    contents.sort();
+    dirs.sort();
     files.sort();
 
-    contents.extend(files);
+    let mut context = Context::new();
+    context.insert("dirs", &dirs);
+    context.insert("files", &files);
+    context.insert("parent", &parent.path);
+    let html = tera.render("directory.html", &context).ok()?;
 
-    let output = format!("<doctype html><html><body style=\"background-color:black;color:white;\">{}</body></html>", contents.join("</br>"));
-
-    Some((ContentType::HTML, output.as_bytes().to_vec()))
+    Some((ContentType::HTML, html.as_bytes().to_vec()))
 }
 
 fn get_ext(name: &str) -> String {
@@ -72,8 +75,8 @@ fn get_ext(name: &str) -> String {
     ).unwrap_or("".to_string())
 }
 
-#[get("/files/<path..>")]
-async fn get_fs(path: PathBuf, fs_conn: &State<FSConnection>) -> Option<(ContentType, Vec<u8>)> {
+#[get("/<path..>")]
+async fn get_fs(path: PathBuf, fs_conn: &State<FSConnection>, tera: &State<Tera>) -> Option<(ContentType, Vec<u8>)> {
     match fs_conn.resolve_path(path).await {
         Ok(fs_type) => match fs_type {
             FSType::File(file) => match file.read(&fs_conn).await {
@@ -81,7 +84,7 @@ async fn get_fs(path: PathBuf, fs_conn: &State<FSConnection>) -> Option<(Content
                 Err(_) => None,
             },
             FSType::Directory(dir) => match dir.contents(fs_conn).await {
-                Ok((files, dirs)) => render_dir(&dir, files, dirs).await,
+                Ok((files, dirs)) => render_dir(&dir, files, dirs, tera).await,
                 Err(_) => None,
             },
         },
@@ -92,8 +95,17 @@ async fn get_fs(path: PathBuf, fs_conn: &State<FSConnection>) -> Option<(Content
 
 #[launch]
 async fn servefs() -> _ {
+    let tera = match Tera::new("templates/**/*") {
+        Ok(t) => t,
+        Err(e) => {
+            println!("Parsing error(s): {}", e);
+            ::std::process::exit(1);
+        }
+    };
+
     let fs_conn = FSConnection::new("sqlite://fs.db", "servefs_", true).await.unwrap();
     rocket::build()
         .manage(fs_conn)
+        .manage(tera)
         .mount("/", routes![get_fs])
 }
