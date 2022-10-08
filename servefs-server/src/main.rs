@@ -14,6 +14,10 @@ struct Args {
    #[arg(short, long)]
    db: Option<String>,
 
+   #[clap(long)]
+   /// Specify database table prefix
+   db_prefix: Option<String>,
+
    /// Location of templates directory
    #[arg(short, long)]
    templates: Option<String>,
@@ -70,12 +74,11 @@ async fn render_dir(parent: &Directory, files: Vec<SqliteRow>, dirs: Vec<SqliteR
     let mut dirs = dirs
         .iter()
         .map(|row| row.get::<String, &str>("directory"))
-        .map(|name| name)
+        .map(|name| name[parent.path.len()..].to_string())
         .collect::<Vec<String>>();
     let mut files = files
         .iter()
         .map(|row| row.get::<String, &str>("name"))
-        .map(|name| name)
         .collect::<Vec<String>>();
 
     dirs.sort();
@@ -120,11 +123,12 @@ async fn get_fs(path: PathBuf, fs_conn: &State<FSConnection>, tera: &State<Tera>
 #[launch]
 async fn servefs() -> _ {
     let default_config_dir = "servefs/";
-    let default_db_prefix = "sqlite://";
+    let default_db_path_prefix = "sqlite://";
+    let default_db_prefix = "servefs_";
     let default_template_file = "directory.html";
     let default_directory_template = r#"<h1>{{parent}}</h1>
 {% for dir in dirs %}
-    <a href="{{dir}}">dir</a></br>
+    <a href="{{parent}}{{dir}}">{{dir}}</a></br>
 {% endfor %}
 {% for file in files %}
     <a href="{{parent}}{{file}}">{{file}}</a></br>
@@ -136,13 +140,18 @@ async fn servefs() -> _ {
 
     let args = Args::parse();
     
+    let db_prefix = match args.db_prefix {
+        Some(prefix) => prefix,
+        None => default_db_prefix.to_string(),
+    };
+
     let db_loc = match args.db {
         Some(db_loc) => db_loc,
         None => {
             let mut db_loc = config.clone();
             db_loc.push("fs.db");
             let db_loc = db_loc.to_str().expect("Couldn't find a default db location").to_string();
-            format!("{}{}", default_db_prefix, db_loc)
+            format!("{}{}", default_db_path_prefix, db_loc)
         },
     };
 
@@ -208,7 +217,7 @@ async fn servefs() -> _ {
         }
     };
 
-    let fs_conn = FSConnection::new(&db_loc, "servefs_", true).await.unwrap();
+    let fs_conn = FSConnection::new(&db_loc, &db_prefix, true).await.unwrap();
     rocket::build()
         .configure(rocket_config)
         .manage(fs_conn)
