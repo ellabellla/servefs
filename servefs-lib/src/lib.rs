@@ -306,6 +306,8 @@ impl Directory {
                 SELECT * FROM {} WHERE directory LIKE
             "#, fs_conn.dir_table))
             .push_bind(&format!("{}%/", self.path))
+            .push("AND directory NOT LIKE")
+            .push_bind(&format!("{}%/%/", self.path))
             .build()
             .fetch_all(&mut conn)
             .await?)
