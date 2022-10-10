@@ -76,12 +76,46 @@ impl File {
         Ok(File{name, directory})
     }
 
+    pub async fn from_id(id: i64, fs_conn: &FSConnection) -> Result<File, FSError> {
+        let mut conn = fs_conn.pool.acquire().await.map_err(|e| FSError::SqlX(e))?;
+        let row = QueryBuilder::new(format!(r#"
+                SELECT name,directory FROM {} WHERE id=
+            "#, fs_conn.file_table))
+            .push_bind(&id)
+            .build()
+            .fetch_one(&mut conn)
+            .await.map_err(|e| FSError::SqlX(e))?;
+
+        Ok(File { name: row.get("name"), directory: Directory::from_id(row.get("directory"), &fs_conn).await? })
+    }
+
+    pub async fn get_id(&self, fs_conn: &FSConnection) -> Result<i64, sqlx::Error> {
+        let mut conn = fs_conn.pool.acquire().await?;
+        Ok(QueryBuilder::new(format!(r#"
+                SELECT id FROM {} WHERE directory=
+            "#, fs_conn.file_table))
+            .push_bind(&self.directory.get_id(&fs_conn).await?)
+            .push("AND name=")
+            .push_bind(&self.name)
+            .build()
+            .fetch_one(&mut conn)
+            .await?
+            .get("id"))
+    }
+
     pub async fn exists(&self, fs_conn: &FSConnection) -> Result<bool, sqlx::Error> {
         let mut conn = fs_conn.pool.acquire().await?;
+        let id = match self.directory.get_id(&fs_conn).await {
+            Ok(id) => id,
+            Err(e) => match e {
+                sqlx::Error::RowNotFound => return Ok(false),
+                _ => return Err(e),
+            }
+        };
         Ok(QueryBuilder::new(format!(r#"
                 SELECT * FROM {} WHERE directory=
             "#, fs_conn.file_table))
-            .push_bind(&self.directory.path)
+            .push_bind(&id)
             .push("AND name=")
             .push_bind(&self.name)
             .build()
@@ -101,7 +135,7 @@ impl File {
             .push(",")
             .push_bind(&data)
             .push(",")
-            .push_bind(&self.directory.path)
+            .push_bind(&self.directory.get_id(&fs_conn).await?)
             .push(");")
             .build()
             .execute(&mut conn)
@@ -114,7 +148,7 @@ impl File {
         QueryBuilder::new(format!(r#"
                 DELETE FROM {} where directory=
             "#, fs_conn.file_table))
-            .push_bind(&self.directory.path)
+            .push_bind(&self.directory.get_id(&fs_conn).await?)
             .push("AND name=")
             .push_bind(&self.name)
             .build()
@@ -131,7 +165,7 @@ impl File {
             "#,fs_conn.file_table))
             .push_bind(&name)
             .push("WHERE directory=")
-            .push_bind(&self.directory.path)
+            .push_bind(&self.directory.get_id(&fs_conn).await?)
             .push("AND name=")
             .push_bind(&self.name)
             .build()
@@ -147,9 +181,9 @@ impl File {
         QueryBuilder::new(format!(r#"
                 UPDATE {} SET directory=
             "#,fs_conn.file_table))
-            .push_bind(&directory.path)
+            .push_bind(&directory.get_id(&fs_conn).await?)
             .push("WHERE directory=")
-            .push_bind(&self.directory.path)
+            .push_bind(&self.directory.get_id(&fs_conn).await?)
             .push("AND name=")
             .push_bind(&self.name)
             .build()
@@ -165,7 +199,7 @@ impl File {
         let row = QueryBuilder::new(format!(r#"
                 SELECT data,type FROM {} WHERE directory=
             "#, fs_conn.file_table))
-            .push_bind(&self.directory.path)
+            .push_bind(&self.directory.get_id(&fs_conn).await?)
             .push("AND name=")
             .push_bind(&self.name)
             .build()
@@ -184,7 +218,7 @@ impl File {
             .push(", type=")
             .push_bind(&ftype.to_string())
             .push("WHERE directory=")
-            .push_bind(&self.directory.path)
+            .push_bind(&self.directory.get_id(&fs_conn).await?)
             .push("AND name=")
             .push_bind(&self.name)
             .build()
@@ -196,6 +230,7 @@ impl File {
 
 pub struct Directory {
     pub path: String,
+    id: Option<i64>,
 }
 
 impl Directory {
@@ -214,11 +249,41 @@ impl Directory {
     }
 
     pub fn new(path: PathBuf) -> Result<Directory, FSError>{
-        Ok(Directory{path: Directory::path_to_str(path)?})
+        Ok(Directory{path: Directory::path_to_str(path)?, id: None})
+    }
+
+    pub async fn from_id(id: i64, fs_conn: &FSConnection) -> Result<Directory, FSError> {
+        let mut conn = fs_conn.pool.acquire().await.map_err(|e| FSError::SqlX(e))?;
+        match QueryBuilder::new(format!(r#"
+                SELECT directory FROM {} WHERE id=
+            "#, fs_conn.dir_table))
+            .push_bind(&id)
+            .build()
+            .fetch_optional(&mut conn)
+            .await.map_err(|e| FSError::SqlX(e))? {
+                Some(row) => Ok(Directory{path: row.get("directory"), id: None}),
+                None => Err(FSError::DoesNotExist(format!("Directory {}", id))),
+            }
     }
 
     pub fn root() -> Directory {
-        Directory { path: "/".to_string() }
+        Directory { path: "/".to_string(), id: None }
+    }
+
+    pub async fn get_id(&self, fs_conn: &FSConnection) -> Result<i64, sqlx::Error> {
+        if let Some(id) = self.id {
+            return Ok(id);
+        } else {
+            let mut conn = fs_conn.pool.acquire().await?;
+            Ok(QueryBuilder::new(format!(r#"
+                    SELECT id FROM {} WHERE directory=
+                "#, fs_conn.dir_table))
+                .push_bind(&self.path)
+                .build()
+                .fetch_one(&mut conn)
+                .await?
+                .get("id"))
+        }
     }
 
     pub async fn exists(&self, fs_conn: &FSConnection) -> Result<bool, sqlx::Error> {
@@ -294,7 +359,7 @@ impl Directory {
         Ok(QueryBuilder::new(format!(r#"
                 SELECT * FROM {} WHERE directory=
             "#, fs_conn.file_table))
-            .push_bind(&self.path)
+            .push_bind(&self.get_id(&fs_conn).await?)
             .build()
             .fetch_all(&mut conn)
             .await?)
@@ -320,14 +385,14 @@ impl Directory {
     pub async fn recurse(&self, fs_conn: &FSConnection) -> Result<(Vec<SqliteRow>, Vec<SqliteRow>), sqlx::Error> {
         let mut conn = fs_conn.pool.acquire().await?;
         Ok((QueryBuilder::new(format!(r#"
-                SELECT name,type,directory FROM {} WHERE directory LIKE 
-            "#, fs_conn.file_table))
+                SELECT id,name,type,{}.directory FROM {},{} WHERE {}.directory={}.id AND {}.directory LIKE 
+            "#, fs_conn.dir_table, fs_conn.dir_table, fs_conn.file_table, fs_conn.file_table, fs_conn.dir_table, fs_conn.dir_table))
             .push_bind(format!("{}%", &self.path))
             .build()
             .fetch_all(&mut conn)
             .await?,
             QueryBuilder::new(format!(r#"
-                SELECT directory FROM {} WHERE directory LIKE 
+                SELECT id,directory FROM {} WHERE directory LIKE 
             "#, fs_conn.dir_table))
             .push_bind(format!("{}%", &self.path))
             .push("AND directory!=")
@@ -336,6 +401,17 @@ impl Directory {
             .fetch_all(&mut conn)
             .await?,))
     }
+
+    pub fn file(&self, name: &str) -> File  {
+        File{name: name.to_string(), directory: Directory { path: self.path.clone(), id: self.id.clone() }}
+    }
+
+    pub fn dir(&self, name: &str) -> Result<Directory, FSError>  {
+        let mut path = PathBuf::from_str(&self.path).map_err(|_| FSError::PathIsNotADir(self.path.to_string()))?;
+        path.push(name);
+        Directory::new(path)
+    }
+
 }
 
 pub struct FSConnection {
@@ -361,7 +437,9 @@ impl FSConnection {
 
     async fn create_dir_table(conn: &mut PoolConnection<Sqlite>, dir_table: &str) -> Result<(), sqlx::Error>{
         QueryBuilder::new(format!(r#"
-                CREATE TABLE {} (directory TEXT PRIMARY KEY NOT NULL CHECK(directory != "" AND (directory = "/" OR directory LIKE "/%/")));
+                CREATE TABLE {} (id INTEGER PRIMARY KEY NOT NULL CHECK(id > 0) UNIQUE,
+                    directory TEXT NOT NULL CHECK(directory != "" AND (directory = "/" OR directory LIKE "/%/")),
+                    CONSTRAINT unq UNIQUE(directory));
                 INSERT INTO {}(directory) VALUES("/");
             "#, dir_table, dir_table))
             .build()
@@ -372,8 +450,8 @@ impl FSConnection {
 
     async fn create_file_table(conn: &mut PoolConnection<Sqlite>, dir_table: &str, file_table: &str, file_type_table: &str) -> Result<(), sqlx::Error>{
         QueryBuilder::new(format!(r#"
-                CREATE TABLE {} (id INTEGER PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL, directory TEXT NOT NULL, 
-                    FOREIGN KEY(directory) REFERENCES {}(directory) ON DELETE CASCADE ON UPDATE CASCADE, 
+                CREATE TABLE {} (id INTEGER PRIMARY KEY check(id > 0), name TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL, directory INTEGER NOT NULL, 
+                    FOREIGN KEY(directory) REFERENCES {}(id) ON DELETE CASCADE ON UPDATE CASCADE, 
                     FOREIGN KEY(type) REFERENCES {}(type) ON DELETE RESTRICT ON UPDATE RESTRICT, 
                     CONSTRAINT unq UNIQUE(name, directory));
             "#, file_table, dir_table, file_type_table))
@@ -579,13 +657,16 @@ mod tests {
         assert!(!dir.exists(&fs_conn).await.unwrap());
         dir.mk(&fs_conn).await.unwrap();
         assert!(dir.exists(&fs_conn).await.unwrap());
+
+        let id = dir.get_id(&fs_conn).await.unwrap();
+        assert_eq!(id, 2);
         
         sub_a.mk(&fs_conn).await.unwrap();
         assert!(sub_a.exists(&fs_conn).await.unwrap());
         sub_b.mk(&fs_conn).await.unwrap();
         assert!(sub_b.exists(&fs_conn).await.unwrap());
         file.mk("data", &FileType::Text, &fs_conn).await.unwrap();
-        assert!(file.exists(&fs_conn).await.unwrap());
+        //assert!(file.exists(&fs_conn).await.unwrap());
 
         dir.mv(&Directory::new(dir.rename("home").unwrap()).unwrap(), &fs_conn).await.unwrap();
         
