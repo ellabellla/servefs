@@ -552,6 +552,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuser"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74928cf021619b0612e45c3a5332e9a5302c6739b7b5eaecd835ba620c346e0d"
+dependencies = [
+ "libc",
+ "log",
+ "page_size",
+ "pkg-config",
+ "users",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1201,6 +1214,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ff7415e9ae3fff1225851df9e0d9e4e5479f947619774677a63572e55e80eff"
 
 [[package]]
+name = "page_size"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebde548fbbf1ea81a99b128872779c437752fb99f217c45245e1a61dcd9edcd"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1793,6 +1816,18 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "dirs",
+ "servefs-lib",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
+name = "servefs-fuse"
+version = "0.1.0"
+dependencies = [
+ "fuser",
+ "libc",
+ "rand",
  "servefs-lib",
  "sqlx",
  "tokio",
@@ -2454,6 +2489,16 @@ dependencies = [
  "form_urlencoded",
  "idna",
  "percent-encoding",
+]
+
+[[package]]
+name = "users"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24cc0f6d6f267b73e5a2cadf007ba8f9bc39c6a6f9666f8cf25ea809a153b032"
+dependencies = [
+ "libc",
+ "log",
 ]
 
 [[package]]

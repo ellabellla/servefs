@@ -4,4 +4,5 @@ members = [
     "servefs-server",
     "servefs-lib",
     "servefs-cli",
+    "servefs-fuse",
 ]

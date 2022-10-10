@@ -1,0 +1,14 @@
+[package]
+name = "servefs-fuse"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+fuser = "0.7"
+libc = "0.2.134"
+servefs-lib = { path = "../servefs-lib"}
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.6", features = [ "runtime-tokio-native-tls" , "sqlite", "json" ] }
+rand = "0.8.5"
