@@ -1827,7 +1827,6 @@ version = "0.1.0"
 dependencies = [
  "fuser",
  "libc",
- "rand",
  "servefs-lib",
  "sqlx",
  "tokio",

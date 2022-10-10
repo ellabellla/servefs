@@ -1,10 +1,9 @@
-use std::{time::{Duration, UNIX_EPOCH, SystemTime, Instant}, path::PathBuf, str, str::FromStr, fs, io::Read, collections::HashMap, ops::Sub};
-use rand::{Rng, rngs::ThreadRng};
+use std::{time::{Duration, UNIX_EPOCH, SystemTime, Instant}, path::PathBuf, str, str::FromStr, fs, collections::HashMap, ops::Sub, process::{Stdio}};
 use fuser::{Filesystem, FileAttr, FileType, MountOption, consts::FOPEN_DIRECT_IO};
 use libc::{ENOENT};
 use servefs_lib::{FSConnection, Directory, File};
 use sqlx::Row;
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, io::{BufReader, AsyncBufReadExt, AsyncReadExt}};
 
 const TTL: Duration = Duration::from_secs(1);
 const INODE_SPLIT:u64 = std::u64::MAX / 2;
@@ -13,20 +12,34 @@ fn file_id_to_ino(id:i64) -> u64 {
     (id as u64) + INODE_SPLIT
 }
 
-async fn exec(command: &str) -> Vec<u8>{
-    tokio::process::Command::new("sh")
+async fn exec(command: &str, rt: &Runtime) -> Vec<u8>{
+    if let Ok(mut child) = tokio::process::Command::new("bash")
         .arg("-c")
         .arg(&command)
-        .output()
-        .await
-        .ok()
-        .and_then(|out| 
-            str::from_utf8(&out.stdout)
-            .ok()
-            .map(|out| out.to_string())
-        )
-        .map(|str| str.as_bytes().to_vec())
-        .unwrap_or(vec![0x0])
+        .stdout(Stdio::piped())
+        .spawn() {
+            let mut reader = BufReader::new(child.stdout.take().unwrap()).lines();
+            let mut buffer = String::new();
+            rt.spawn( async move {
+                tokio::time::timeout(Duration::from_secs(1), child.wait()).await
+            });
+            let start = Instant::now();
+
+            while start.elapsed() < Duration::from_secs(1) {
+                if let Ok(Ok(line)) = async {tokio::time::timeout(Duration::from_millis(100), reader.next_line()).await}.await {
+                    if let None = line {
+                        break;
+                    }
+                    buffer.extend(line);
+                    buffer.push('\n');
+                }
+
+            }
+            
+            buffer.as_bytes().to_vec()
+        } else {
+            vec![0x0]
+        }
 }
 
 fn get_data(data: &str, ftype: &servefs_lib::FileType, rt: &Runtime) -> Vec<u8> {
@@ -40,10 +53,7 @@ fn get_data(data: &str, ftype: &servefs_lib::FileType, rt: &Runtime) -> Vec<u8> 
             },
         },
         servefs_lib::FileType::Text => data.as_bytes().to_vec(),
-        servefs_lib::FileType::Exec => rt.block_on(async {tokio::time::timeout(
-            tokio::time::Duration::from_secs(1), 
-            exec(&data)
-        ).await}).unwrap_or(vec![0x0]),
+        servefs_lib::FileType::Exec => rt.block_on(exec(&data, rt)),
     }
 }
 
@@ -310,12 +320,14 @@ impl Filesystem for ServeFS {
                             if data.len() == 0{
                                 println!("not found {}", ino);
                             }
-                            if offset as usize >= data.len() {
-                                reply.data(&vec![]);
-                                println!("offset wrong {}", ino);
+
+                            let size = if size > data.len() as u32 {
+                                data.len()
                             } else {
-                                reply.data(&data[offset as usize..])
-                            }
+                                size as usize
+                            };
+
+                            reply.data(&data[offset as usize..size])
                         }
                     }
                 },
