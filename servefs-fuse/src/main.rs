@@ -1,13 +1,21 @@
-use std::{time::{Duration, UNIX_EPOCH, SystemTime, Instant}, path::PathBuf, str, str::FromStr, fs, collections::HashMap, ops::Sub, process::{Stdio}};
+use std::{time::{Duration, UNIX_EPOCH, Instant}, path::PathBuf, str, str::FromStr, fs, collections::HashMap, process::{Stdio}, os::{unix::prelude::{PermissionsExt}, linux::fs::MetadataExt}};
 use fuser::{Filesystem, FileAttr, FileType, MountOption, consts::FOPEN_DIRECT_IO};
 use libc::{ENOENT};
 use servefs_lib::{FSConnection, Directory, File};
 use sqlx::Row;
-use tokio::{runtime::Runtime, io::{BufReader, AsyncBufReadExt, AsyncReadExt}};
+use tokio::{runtime::Runtime, io::{BufReader, AsyncBufReadExt}};
 
 const TTL: Duration = Duration::from_secs(1);
 const INODE_SPLIT:u64 = std::u64::MAX / 2;
 
+fn calc_size(size: usize, offset:usize, data: &Vec<u8>) -> usize {
+    let size = offset as usize + size as usize;
+    if size > data.len() {
+        data.len()
+    } else {
+        size
+    }
+}
 fn file_id_to_ino(id:i64) -> u64 {
     (id as u64) + INODE_SPLIT
 }
@@ -18,7 +26,11 @@ async fn exec(command: &str, rt: &Runtime) -> Vec<u8>{
         .arg(&command)
         .stdout(Stdio::piped())
         .spawn() {
-            let mut reader = BufReader::new(child.stdout.take().unwrap()).lines();
+            let stdout = match child.stdout.take() {
+                Some(stdout) => stdout,
+                None => return vec![],
+            };
+            let mut reader = BufReader::new(stdout).lines();
             let mut buffer = String::new();
             rt.spawn( async move {
                 tokio::time::timeout(Duration::from_secs(1), child.wait()).await
@@ -45,7 +57,7 @@ async fn exec(command: &str, rt: &Runtime) -> Vec<u8>{
 fn get_data(data: &str, ftype: &servefs_lib::FileType, rt: &Runtime) -> Vec<u8> {
     println!("data {}", data);
     match ftype {
-        servefs_lib::FileType::File => match fs::read(data) {
+        servefs_lib::FileType::File => match fs::read(&data) {
             Ok(file) => file,
             Err(e) => {
                 println!("{:?}", e);
@@ -60,31 +72,18 @@ fn get_data(data: &str, ftype: &servefs_lib::FileType, rt: &Runtime) -> Vec<u8> 
 struct Store {
     store: HashMap<u64, (Instant, Vec<u8>)>,
     counts: HashMap<u64, u64>,
-    timeout: Duration,
 }
 
 impl Store {
-    pub fn update(&mut self, id: &u64, file: &File, rt: &Runtime, fs_conn: &FSConnection) {
+    pub fn insert(&mut self, id: &u64, file: &File, rt: &Runtime, fs_conn: &FSConnection) {
         println!("update id{}", id);
-        let time = self.store.get(id).map(|(t,_)| t.clone()).unwrap_or_else(|| {
-            if let Some(count) = self.counts.get_mut(&id) {
-                *count = *count + 1;
-            } else {
-                self.counts.insert(*id, 1);
-            }
-            Instant::now().sub(self.timeout)
-        });
-        if time.elapsed() >= self.timeout {
-            println!("updated {:?}", time.elapsed());
-            let data = rt.block_on(file.read(fs_conn))
-                .map(|(data, ftype)| {
-                    servefs_lib::FileType::from_str(&ftype)
-                        .map(|ftype| get_data(&data, &ftype, rt))
-                        .unwrap_or(vec![0x0])
-                }).unwrap_or(vec![0x0]);
-            self.store.insert(id.clone(), (Instant::now(), data));
-
-        }
+        let data = rt.block_on(file.read(fs_conn))
+            .map(|(data, ftype)| {
+                servefs_lib::FileType::from_str(&ftype)
+                    .map(|ftype| get_data(&data, &ftype, rt))
+                    .unwrap_or(vec![0x0])
+            }).unwrap_or(vec![0x0]);
+        self.store.insert(id.clone(), (Instant::now(), data));
     }
 
     pub fn get(&self, id: &u64) -> Option<&Vec<u8>> {
@@ -118,14 +117,55 @@ struct ServeFS {
 }
 
 impl ServeFS {
-    fn create_file_attr(&self, ino: u64, size: u64) -> FileAttr {
-        /*let size = self.rt.block_on(file.read(&self.fs_conn))
+    fn create_file_attr(&self, ino: u64, size: u64, file: &File) -> FileAttr {
+        let (data, ftype) = self.rt.block_on(file.read(&self.fs_conn))
             .map(|(data, ftype)| {
                 servefs_lib::FileType::from_str(&ftype)
-                    .map(|ftype| get_data(&data, &ftype).len() as u64)
-                    .unwrap_or(0)
-            }).unwrap_or(0);*/
+                    .map(|ftype| (data, ftype))
+                    .unwrap_or(("".to_string(), servefs_lib::FileType::Exec))
+            }).unwrap_or(("".to_string(), servefs_lib::FileType::Exec));
         
+        match ftype {
+            servefs_lib::FileType::File =>if let Ok(meta) = fs::File::open(&data).and_then(|file| file.metadata()) {
+                return FileAttr{
+                    ino: ino,
+                    size: meta.st_size(),
+                    blocks: 1,
+                    atime: meta.accessed().unwrap_or(UNIX_EPOCH),
+                    mtime: meta.modified().unwrap_or(UNIX_EPOCH),
+                    ctime: UNIX_EPOCH,
+                    crtime: meta.created().unwrap_or(UNIX_EPOCH),
+                    kind: FileType::RegularFile,
+                    perm: meta.permissions().mode() as u16,
+                    nlink: 1,
+                    uid: meta.st_uid(),
+                    gid: meta.st_gid(),
+                    rdev: meta.st_rdev() as u32,
+                    flags:0,
+                    blksize: 512,
+                    padding: 0,
+                };
+            },
+            servefs_lib::FileType::Text => return FileAttr{
+                ino: ino,
+                size: data.len() as u64,
+                blocks: 1,
+                atime: UNIX_EPOCH,
+                mtime: UNIX_EPOCH,
+                ctime: UNIX_EPOCH,
+                crtime: UNIX_EPOCH,
+                kind: FileType::RegularFile,
+                perm: 0o644,
+                nlink: 1,
+                uid: unsafe {libc::geteuid() as u32},
+                gid: unsafe {libc::getegid() as u32},
+                rdev: 0,
+                flags: 0,
+                blksize: 512,
+                padding: 0,
+            },
+            servefs_lib::FileType::Exec => (),
+        }
         //println!("{} size", size);
         FileAttr{
             ino: ino,
@@ -178,7 +218,14 @@ impl Filesystem for ServeFS {
         } else {
             match self.rt.block_on(Directory::from_id(parent as i64, &self.fs_conn)) {
                 Ok(parent) => {
-                    let file = parent.file(name.to_str().unwrap());
+                    let name = match name.to_str() {
+                        Some(name) => name,
+                        None => {
+                            reply.error(ENOENT);
+                            return;
+                        },
+                    };
+                    let file = parent.file(name);
                     
                     if self.rt.block_on(file.exists(&self.fs_conn)).unwrap_or(false) {
                         let id = match self.rt.block_on(file.get_id(&self.fs_conn)) {
@@ -191,26 +238,24 @@ impl Filesystem for ServeFS {
                         };
                         reply.entry(
                             &TTL, 
-                            &self.create_file_attr(file_id_to_ino(id), 1), 
+                            &self.create_file_attr(file_id_to_ino(id), 1, &file), 
                             0);
                     } else {
-                        if let Some(name) = name.to_str() {
-                            if let Ok(dir) = parent.dir(&name) {
-                                if self.rt.block_on(dir.exists(&self.fs_conn)).unwrap_or(false) {
-                                    let id = match self.rt.block_on(dir.get_id(&self.fs_conn)) {
-                                        Ok(id) => id,
-                                        Err(e) => {
-                                            println!("{:?}", e);
-                                            reply.error(ENOENT);
-                                            return;
-                                        }
-                                    };
-            
-                                    reply.entry(
-                                        &TTL, 
-                                        &self.create_dir_attr(id as u64), 
-                                        0);
-                                }
+                        if let Ok(dir) = parent.dir(&name) {
+                            if self.rt.block_on(dir.exists(&self.fs_conn)).unwrap_or(false) {
+                                let id = match self.rt.block_on(dir.get_id(&self.fs_conn)) {
+                                    Ok(id) => id,
+                                    Err(e) => {
+                                        println!("{:?}", e);
+                                        reply.error(ENOENT);
+                                        return;
+                                    }
+                                };
+        
+                                reply.entry(
+                                    &TTL, 
+                                    &self.create_dir_attr(id as u64), 
+                                    0);
                             }
                         }
                     }
@@ -230,7 +275,7 @@ impl Filesystem for ServeFS {
                 Ok(file) => {
                     reply.attr(
                         &TTL, 
-                        &self.create_file_attr(ino, 1));
+                        &self.create_file_attr(ino, 1, &file));
                 }
                 Err(e) => {println!("{:?}", e);
                 reply.error(ENOENT)},
@@ -252,7 +297,7 @@ impl Filesystem for ServeFS {
         if ino >=  INODE_SPLIT {
             let ino = ino - INODE_SPLIT;
             match self.rt.block_on(File::from_id(ino as i64, &self.fs_conn)) {
-                Ok(file) => {
+                Ok(_) => {
                     reply.ok()
                 }
                 Err(e) => {println!("{:?}", e);
@@ -269,12 +314,12 @@ impl Filesystem for ServeFS {
         }
     }
 
-    fn open(&mut self, req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
+    fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
         if ino >=  INODE_SPLIT {
             let ino = ino - INODE_SPLIT;
             match self.rt.block_on(File::from_id(ino as i64, &self.fs_conn)) {
                 Ok(file) => {
-                    self.store.update(&ino, &file, &self.rt, &self.fs_conn);
+                    self.store.insert(&ino, &file, &self.rt, &self.fs_conn);
                     reply.opened(ino, FOPEN_DIRECT_IO);
                 },
                 Err(e) => {
@@ -302,34 +347,23 @@ impl Filesystem for ServeFS {
             let ino = ino - INODE_SPLIT;
             match self.rt.block_on(File::from_id(ino as i64, &self.fs_conn)) {
                 Ok(file) => {
-                    if self.store.contains(&fh) {
-                        println!("fh used {}", ino);
-                        self.store.update(&ino, &file, &self.rt, &self.fs_conn);
-                        let empty = vec![0x0];
-                        let data = self.store.get(&fh).unwrap_or(&empty);
-                        let size = if size > data.len() as u32 {
-                            data.len()
-                        } else {
-                            size as usize
-                        };
-                        reply.data(&data[offset as usize..size])
-                    } else if let Ok((data, ftype)) = self.rt.block_on(file.read(&self.fs_conn)) {
-                        if let Ok(ftype) = servefs_lib::FileType::from_str(&ftype) {
-                            let data = get_data(&data, &ftype, &self.rt);
-
-                            if data.len() == 0{
-                                println!("not found {}", ino);
-                            }
-
-                            let size = if size > data.len() as u32 {
-                                data.len()
-                            } else {
-                                size as usize
-                            };
-
-                            reply.data(&data[offset as usize..size])
-                        }
+                    let empty = vec![0x0];
+                    let mut tmp = vec![];
+                    let data = self.store.get(&fh).or_else(|| {
+                        self.rt.block_on(file.read(&self.fs_conn)).map(|(data_str, ftype)| {
+                            servefs_lib::FileType::from_str(&ftype).map(|ftype| {
+                                tmp = get_data(&data_str, &ftype, &self.rt);
+                                &tmp
+                            }).unwrap_or(&empty)
+                        }).ok()
+                    }).unwrap_or(&empty);
+                    let size = calc_size(size as usize, offset as usize, data);
+                    if offset as usize > data.len() {
+                        reply.data(&vec![]);
+                        return;
                     }
+                    println!("read {} {} {}", ino, offset, size);
+                    reply.data(&data[offset as usize..size]);
                 },
                 Err(e) => {
                     println!("{:?}", e);
@@ -410,6 +444,6 @@ fn main() {
     let options = vec![MountOption::RO, MountOption::FSName("hello".to_string()), MountOption::AutoUnmount];
     let rt = Runtime::new().unwrap();
     let fs_conn =  rt.block_on(FSConnection::new("sqlite:///home/ella/.config/servefs/fs.db", "servefs_", true)).unwrap();
-    let servefs = ServeFS{ fs_conn, rt, store: Store { store: HashMap::new(), counts: HashMap::new(), timeout: Duration::from_secs(1) } };
+    let servefs = ServeFS{ fs_conn, rt, store: Store { store: HashMap::new(), counts: HashMap::new() } };
     fuser::mount2(servefs, "./mnt", &options).unwrap();
 }
