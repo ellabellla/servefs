@@ -1,6 +1,7 @@
 use std::{time::{Duration, UNIX_EPOCH, Instant}, path::PathBuf, str, str::FromStr, fs, collections::HashMap, process::{Stdio}, os::{unix::prelude::{PermissionsExt}, linux::fs::MetadataExt}};
 use fuser::{Filesystem, FileAttr, FileType, MountOption, consts::FOPEN_DIRECT_IO};
 use libc::{ENOENT};
+use rand::{rngs::ThreadRng, Rng};
 use servefs_lib::{FSConnection, Directory, File};
 use sqlx::Row;
 use tokio::{runtime::Runtime, io::{BufReader, AsyncBufReadExt}};
@@ -55,7 +56,7 @@ async fn exec(command: &str, rt: &Runtime) -> Vec<u8>{
 }
 
 fn get_data(data: &str, ftype: &servefs_lib::FileType, rt: &Runtime) -> Vec<u8> {
-    println!("data {}", data);
+    println!("get data {}", data);
     match ftype {
         servefs_lib::FileType::File => match fs::read(&data) {
             Ok(file) => file,
@@ -70,43 +71,41 @@ fn get_data(data: &str, ftype: &servefs_lib::FileType, rt: &Runtime) -> Vec<u8> 
 }
 
 struct Store {
-    store: HashMap<u64, (Instant, Vec<u8>)>,
-    counts: HashMap<u64, u64>,
+    store: HashMap<u64, Vec<u8>>,
+    rng: ThreadRng,
 }
 
 impl Store {
-    pub fn insert(&mut self, id: &u64, file: &File, rt: &Runtime, fs_conn: &FSConnection) {
-        println!("update id{}", id);
+    pub fn insert(&mut self, file: &File, rt: &Runtime, fs_conn: &FSConnection) -> u64 {
         let data = rt.block_on(file.read(fs_conn))
             .map(|(data, ftype)| {
                 servefs_lib::FileType::from_str(&ftype)
                     .map(|ftype| get_data(&data, &ftype, rt))
                     .unwrap_or(vec![0x0])
             }).unwrap_or(vec![0x0]);
-        self.store.insert(id.clone(), (Instant::now(), data));
+        let mut fh = self.rng.gen::<u64>();
+        while self.store.contains_key(&fh) {
+            fh = self.rng.gen();
+        }
+        self.store.insert(fh, data);
+        println!("insert {} into {}", rt.block_on(file.get_id(&fs_conn)).unwrap_or(-1), fh);
+        fh
     }
 
-    pub fn get(&self, id: &u64) -> Option<&Vec<u8>> {
-        if let Some((_, data)) = self.store.get(&id){
+    pub fn get(&self, fh: &u64) -> Option<&Vec<u8>> {
+        if let Some(data) = self.store.get(&fh){
             return Some(data);
         }
 
         return None
     }
 
-    pub fn contains(&self, id: &u64) -> bool  {
-        self.store.contains_key(id)
+    pub fn contains(&self, fh: &u64) -> bool  {
+        self.store.contains_key(fh)
     } 
 
-    pub fn remove(&mut self, id: &u64) {
-        if let Some(count) = self.counts.get_mut(&id) {
-            *count = *count - 1;
-            if *count == 0 {
-                self.store.remove(id);
-            }
-        } else {
-            self.store.remove(id);
-        }
+    pub fn remove(&mut self, fh: &u64) {
+        self.store.remove(fh);
     }
 }
 
@@ -166,7 +165,6 @@ impl ServeFS {
             },
             servefs_lib::FileType::Exec => (),
         }
-        //println!("{} size", size);
         FileAttr{
             ino: ino,
             size: size,
@@ -212,7 +210,7 @@ impl ServeFS {
 
 impl Filesystem for ServeFS {
     fn lookup(&mut self, _req: &fuser::Request<'_>, parent: u64, name: &std::ffi::OsStr, reply: fuser::ReplyEntry) {
-        println!("{} {}", parent, name.to_string_lossy());
+        println!("lookup {} {}", parent, name.to_string_lossy());
         if parent >= INODE_SPLIT {
             reply.error(ENOENT)
         } else {
@@ -319,8 +317,9 @@ impl Filesystem for ServeFS {
             let ino = ino - INODE_SPLIT;
             match self.rt.block_on(File::from_id(ino as i64, &self.fs_conn)) {
                 Ok(file) => {
-                    self.store.insert(&ino, &file, &self.rt, &self.fs_conn);
-                    reply.opened(ino, FOPEN_DIRECT_IO);
+                    let fh = self.store.insert( &file, &self.rt, &self.fs_conn);
+                    println!("created fh {}", fh);
+                    reply.opened(fh, FOPEN_DIRECT_IO);
                 },
                 Err(e) => {
                     println!("{:?}", e);
@@ -362,7 +361,7 @@ impl Filesystem for ServeFS {
                         reply.data(&vec![]);
                         return;
                     }
-                    println!("read {} {} {}", ino, offset, size);
+                    println!("read {} {} {} {}", fh, ino, offset, size);
                     reply.data(&data[offset as usize..size]);
                 },
                 Err(e) => {
@@ -379,15 +378,15 @@ impl Filesystem for ServeFS {
             &mut self,
             _req: &fuser::Request<'_>,
             ino: u64,
-            _fh: u64,
+            fh: u64,
             _flags: i32,
             _lock_owner: Option<u64>,
             _flush: bool,
             reply: fuser::ReplyEmpty,
         ) {
         if ino >=  INODE_SPLIT {
-            let ino = ino - INODE_SPLIT;
-            self.store.remove(&ino);
+            println!("released fh {}", fh);
+            self.store.remove(&fh);
             reply.ok()
         }
     }
@@ -428,8 +427,6 @@ impl Filesystem for ServeFS {
             }
         }
 
-        //println!("{:?}", entries);
-
         for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
             // i + 1 means the index of the next entry
             if reply.add(entry.0, (i + 1) as i64, entry.1, entry.2) {
@@ -444,6 +441,6 @@ fn main() {
     let options = vec![MountOption::RO, MountOption::FSName("hello".to_string()), MountOption::AutoUnmount];
     let rt = Runtime::new().unwrap();
     let fs_conn =  rt.block_on(FSConnection::new("sqlite:///home/ella/.config/servefs/fs.db", "servefs_", true)).unwrap();
-    let servefs = ServeFS{ fs_conn, rt, store: Store { store: HashMap::new(), counts: HashMap::new() } };
+    let servefs = ServeFS{ fs_conn, rt, store: Store { store: HashMap::new(), rng: rand::thread_rng() } };
     fuser::mount2(servefs, "./mnt", &options).unwrap();
 }
