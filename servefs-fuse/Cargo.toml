@@ -1,7 +1,11 @@
 [package]
 name = "servefs-fuse"
+authors = ["Ella Pash"]
 version = "0.1.0"
 edition = "2021"
+description = "A fuse3 interface for a sqlite based filesystem"
+license = "../MIT"
+readme = "../README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -12,3 +16,5 @@ servefs-lib = { path = "../servefs-lib"}
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.6", features = [ "runtime-tokio-native-tls" , "sqlite", "json" ] }
 rand = "0.8.5"
+clap = { version = "4.0.10", features = ["derive"] }
+dirs = "4.0.0"

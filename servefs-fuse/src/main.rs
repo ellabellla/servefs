@@ -1,4 +1,5 @@
-use std::{time::{Duration, UNIX_EPOCH, Instant}, path::PathBuf, str, str::FromStr, fs, collections::HashMap, process::{Stdio}, os::{unix::prelude::{PermissionsExt}, linux::fs::MetadataExt}};
+use std::{time::{Duration, UNIX_EPOCH, Instant}, path::PathBuf, str, str::FromStr, fs, collections::HashMap, process::{Stdio}, os::{unix::prelude::{PermissionsExt}, linux::fs::MetadataExt}, sync::{Mutex}};
+use clap::Parser;
 use fuser::{Filesystem, FileAttr, FileType, MountOption, consts::FOPEN_DIRECT_IO};
 use libc::{ENOENT};
 use rand::{rngs::ThreadRng, Rng};
@@ -8,6 +9,19 @@ use tokio::{runtime::Runtime, io::{BufReader, AsyncBufReadExt}};
 
 const TTL: Duration = Duration::from_secs(1);
 const INODE_SPLIT:u64 = std::u64::MAX / 2;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+   /// Location of database
+   #[arg(short, long)]
+   db: Option<String>,
+
+   #[clap()]
+   /// Mount path
+   mnt_path: String,
+}
+
 
 fn calc_size(size: usize, offset:usize, data: &Vec<u8>) -> usize {
     let size = offset as usize + size as usize;
@@ -100,6 +114,7 @@ impl Store {
         return None
     }
 
+    #[allow(dead_code)]
     pub fn contains(&self, fh: &u64) -> bool  {
         self.store.contains_key(fh)
     } 
@@ -112,7 +127,7 @@ impl Store {
 struct ServeFS {
     fs_conn: FSConnection,
     rt: Runtime,
-    store: Store,
+    store: Mutex<Store>,
 }
 
 impl ServeFS {
@@ -317,7 +332,7 @@ impl Filesystem for ServeFS {
             let ino = ino - INODE_SPLIT;
             match self.rt.block_on(File::from_id(ino as i64, &self.fs_conn)) {
                 Ok(file) => {
-                    let fh = self.store.insert( &file, &self.rt, &self.fs_conn);
+                    let fh = self.store.lock().unwrap().insert( &file, &self.rt, &self.fs_conn);
                     println!("created fh {}", fh);
                     reply.opened(fh, FOPEN_DIRECT_IO);
                 },
@@ -348,7 +363,8 @@ impl Filesystem for ServeFS {
                 Ok(file) => {
                     let empty = vec![0x0];
                     let mut tmp = vec![];
-                    let data = self.store.get(&fh).or_else(|| {
+                    let store = self.store.lock().unwrap();
+                    let data = store.get(&fh).or_else(|| {
                         self.rt.block_on(file.read(&self.fs_conn)).map(|(data_str, ftype)| {
                             servefs_lib::FileType::from_str(&ftype).map(|ftype| {
                                 tmp = get_data(&data_str, &ftype, &self.rt);
@@ -386,7 +402,7 @@ impl Filesystem for ServeFS {
         ) {
         if ino >=  INODE_SPLIT {
             println!("released fh {}", fh);
-            self.store.remove(&fh);
+            self.store.lock().unwrap().remove(&fh);
             reply.ok()
         }
     }
@@ -428,7 +444,6 @@ impl Filesystem for ServeFS {
         }
 
         for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
-            // i + 1 means the index of the next entry
             if reply.add(entry.0, (i + 1) as i64, entry.1, entry.2) {
                 break;
             }
@@ -438,9 +453,34 @@ impl Filesystem for ServeFS {
 }
 
 fn main() {
-    let options = vec![MountOption::RO, MountOption::FSName("hello".to_string()), MountOption::AutoUnmount];
+    let default_config_dir = "servefs/";
+    let default_db_path_prefix = "sqlite://";
+
+    let mut config = dirs::config_dir().expect("Could not find config path.");
+    config.push(default_config_dir);
+    fs::create_dir_all(&config).expect("Couldn't find a default config location");
+
+    let args = Args::parse();
+
+    let db_loc = match args.db {
+        Some(db_loc) => db_loc,
+        None => {
+            let mut db_loc = config.clone();
+            db_loc.push("fs.db");
+            let db_loc = db_loc.to_str().expect("Couldn't find a default db location").to_string();
+            format!("{}{}", default_db_path_prefix, db_loc)
+        },
+    };
+    let options = vec![
+        MountOption::RO,
+        MountOption::FSName("servefs".to_string()), 
+        MountOption::AutoUnmount, 
+        MountOption::Exec,
+        MountOption::Async,
+        MountOption::NoAtime,
+    ];
     let rt = Runtime::new().unwrap();
-    let fs_conn =  rt.block_on(FSConnection::new("sqlite:///home/ella/.config/servefs/fs.db", "servefs_", true)).unwrap();
-    let servefs = ServeFS{ fs_conn, rt, store: Store { store: HashMap::new(), rng: rand::thread_rng() } };
-    fuser::mount2(servefs, "./mnt", &options).unwrap();
+    let fs_conn =  rt.block_on(FSConnection::new(&db_loc, "servefs_", true)).unwrap();
+    let servefs = ServeFS{ fs_conn, rt, store: Mutex::new(Store { store: HashMap::new(), rng: rand::thread_rng() }) };
+    fuser::mount2(servefs, args.mnt_path, &options).unwrap();
 }
