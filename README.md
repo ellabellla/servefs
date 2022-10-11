@@ -9,6 +9,8 @@ It uses a sqlite database to store file metadata and Tera templates to serve web
   - allows you to graphically navigate directories and view files
 - servefs-cli
   - command line interface to create/modify/view files and directories
+- servefs-fuse
+  - a fuse3 mountable filesystem using the sqlite backend
 - servefs-lib
   - a library for interacting with the sqlite backend
 
@@ -48,16 +50,40 @@ Options:
   -V, --version          Print version information
 ```
 
+### ServeFS Fuse
+```
+A fuse3 interface for a sqlite based filesystem
+
+Usage: servefs-fuse [OPTIONS] <MNT_PATH>
+
+Arguments:
+  <MNT_PATH>  Mount path
+
+Options:
+  -d, --db <DB>  Location of database
+  -h, --help     Print help information
+  -V, --version  Print version information
+```
+
 ## Install
 ```bash
 git clone https://github.com/ellabellla/servefs.git
 cd servefs
 cargo install --path ./servefs-server
 cargo install --path ./servefs-cli
+cargo install --path ./servefs-fuse
+```
+
+### Installing ServeFS Fuse
+To install ServeFS Fuse you must first install fuse 3 for your distribution of linux.
+e.g.
+```bash
+sudo pacman -S fuse3
 ```
 
 ## Uninstall
 ```bash
+cargo uninstall servefs-fuse
 cargo uninstall servefs-server
 cargo uninstall servefs
 ```
